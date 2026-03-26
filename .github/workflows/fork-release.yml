@@ -1,0 +1,84 @@
+name: Fork Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create, for example fork-2026.03.26.1
+        required: true
+        type: string
+      release_name:
+        description: Optional GitHub release title
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a pre-release
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build Release Assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_NAME: ${{ inputs.release_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc zip
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade build hatchling wheel setuptools
+
+      - name: Build release artifacts
+        run: |
+          python devscripts/make_lazy_extractors.py
+          make yt-dlp
+          make yt-dlp.tar.gz
+          python -m build --no-isolation .
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          cp ../yt-dlp .
+          cp ../yt-dlp.tar.gz .
+          sha256sum yt-dlp yt-dlp.tar.gz ./* > SHA256SUMS
+
+      - name: Resolve release name
+        id: names
+        run: |
+          if [ -n "${RELEASE_NAME}" ]; then
+            echo "name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=yt-dlp ${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ steps.names.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease }}
+          files: |
+            dist/*
