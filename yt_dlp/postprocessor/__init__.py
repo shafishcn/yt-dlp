@@ -30,7 +30,12 @@ from .metadataparser import (
 )
 from .modify_chapters import ModifyChaptersPP
 from .movefilesafterdownload import MoveFilesAfterDownloadPP
+from .gcsupload import GCSUploadPP
+from .ossupload import OSSUploadPP
+from .rcloneupload import RcloneUploadPP
+from .s3upload import S3UploadPP
 from .sponsorblock import SponsorBlockPP
+from .upyunupload import UpYunUploadPP
 from .xattrpp import XAttrMetadataPP
 from ..globals import plugin_pps, postprocessors
 from ..plugins import PACKAGE_NAME, register_plugin_spec, PluginSpec

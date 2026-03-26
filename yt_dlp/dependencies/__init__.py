@@ -67,6 +67,31 @@ except ImportError:
     requests = None
 
 try:
+    import boto3
+except ImportError:
+    boto3 = None
+
+try:
+    from google.cloud import storage as google_cloud_storage
+except ImportError:
+    google_cloud_storage = None
+
+try:
+    from google.oauth2 import service_account as google_service_account
+except ImportError:
+    google_service_account = None
+
+try:
+    import alibabacloud_oss_v2
+except ImportError:
+    alibabacloud_oss_v2 = None
+
+try:
+    import upyun
+except ImportError:
+    upyun = None
+
+try:
     import xattr  # xattr or pyxattr
 except ImportError:
     xattr = None

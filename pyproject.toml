@@ -68,6 +68,18 @@ secretstorage = [
     "cffi",
     "secretstorage",
 ]
+s3 = [
+    "boto3>=1.35,<2",
+]
+gcs = [
+    "google-cloud-storage>=2.18,<4",
+]
+oss = [
+    "alibabacloud-oss-v2>=1.2,<2",
+]
+upyun = [
+    "upyun",
+]
 deno = [
     "deno>=2.6.6",  # v2.6.5 fixes compatibility, v2.6.6 adds integrity check
 ]

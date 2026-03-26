@@ -9,16 +9,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 import subprocess
+import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import shell_quote
 from yt_dlp.postprocessor import (
     ExecPP,
     FFmpegThumbnailsConvertorPP,
+    GCSUploadPP,
     MetadataFromFieldPP,
     MetadataParserPP,
     ModifyChaptersPP,
+    OSSUploadPP,
+    RcloneUploadPP,
+    S3UploadPP,
     SponsorBlockPP,
+    UpYunUploadPP,
 )
 
 
@@ -91,6 +99,276 @@ class TestExec(unittest.TestCase):
         self.assertEqual(pp.parse_cmd('echo {}', info), cmd)
         self.assertEqual(pp.parse_cmd('echo %(filepath)q', info), cmd)
 
+
+class TestRcloneUpload(unittest.TestCase):
+    def test_builds_destination_from_remote_and_target(self):
+        pp = RcloneUploadPP(
+            YoutubeDL(),
+            remote='minio:archive',
+            target='%(uploader)s/%(title)s.%(ext)s')
+        info = {
+            'filepath': '/tmp/test-video.mp4',
+            'uploader': 'creator',
+            'title': 'clip',
+            'ext': 'mp4',
+        }
+
+        with patch('yt_dlp.postprocessor.rcloneupload.check_executable', return_value='rclone'):
+            cmd, destination = pp._get_command(info)
+
+        self.assertEqual(destination, 'minio:archive/creator/clip.mp4')
+        self.assertEqual(cmd[:4], ['rclone', 'copyto', '/tmp/test-video.mp4', 'minio:archive/creator/clip.mp4'])
+
+    def test_delete_local_after_successful_upload(self):
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            filepath = tmp.name
+
+        pp = RcloneUploadPP(YoutubeDL(), remote='gcs:videos', delete_local=True)
+        info = {'filepath': filepath}
+
+        try:
+            with patch('yt_dlp.postprocessor.rcloneupload.check_executable', return_value='rclone'):
+                with patch('yt_dlp.postprocessor.rcloneupload.Popen.run', return_value=('', '', 0)) as run:
+                    _, out_info = pp.run(info)
+
+            self.assertFalse(os.path.exists(filepath))
+            self.assertEqual(out_info['rclone_destination'], f'gcs:videos/{os.path.basename(filepath)}')
+            run.assert_called_once()
+        finally:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+
+
+class TestS3Upload(unittest.TestCase):
+    class _FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def upload_file(self, filename, bucket, key, ExtraArgs=None):
+            self.calls.append((filename, bucket, key, ExtraArgs))
+
+    class _FakeSession:
+        def __init__(self, client):
+            self._client = client
+            self.created = []
+
+        def client(self, service_name, **kwargs):
+            self.created.append((service_name, kwargs))
+            return self._client
+
+    def test_builds_key_and_uploads(self):
+        client = self._FakeClient()
+        session = self._FakeSession(client)
+        info = {
+            'filepath': '/tmp/test-video.mp4',
+            'uploader': 'creator',
+            'title': 'clip',
+            'ext': 'mp4',
+        }
+        pp = S3UploadPP(
+            YoutubeDL(),
+            bucket='media-bucket',
+            key='%(uploader)s/%(title)s.%(ext)s',
+            endpoint_url='https://minio.example.com',
+            aws_access_key_id='abc',
+            aws_secret_access_key='def',
+        )
+
+        with patch('yt_dlp.postprocessor.s3upload.boto3') as boto3_mock:
+            boto3_mock.session.Session.return_value = session
+            _, out_info = pp.run(info)
+
+        self.assertEqual(client.calls[0][1:], ('media-bucket', 'creator/clip.mp4', {'ContentType': 'video/mp4'}))
+        self.assertEqual(out_info['s3_url'], 's3://media-bucket/creator/clip.mp4')
+        self.assertEqual(session.created[0][0], 's3')
+        self.assertEqual(session.created[0][1]['endpoint_url'], 'https://minio.example.com')
+
+    def test_delete_local_after_successful_upload(self):
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            filepath = tmp.name
+
+        client = self._FakeClient()
+        session = self._FakeSession(client)
+        pp = S3UploadPP(YoutubeDL(), bucket='bucket', delete_local=True)
+        try:
+            with patch('yt_dlp.postprocessor.s3upload.boto3') as boto3_mock:
+                boto3_mock.session.Session.return_value = session
+                _, out_info = pp.run({'filepath': filepath})
+
+            self.assertFalse(os.path.exists(filepath))
+            self.assertEqual(out_info['s3_url'], f's3://bucket/{os.path.basename(filepath)}')
+        finally:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+
+
+class TestGCSUpload(unittest.TestCase):
+    class _FakeBlob:
+        def __init__(self):
+            self.calls = []
+
+        def upload_from_filename(self, filename, content_type=None, predefined_acl=None):
+            self.calls.append((filename, content_type, predefined_acl))
+
+    class _FakeBucket:
+        def __init__(self, blob):
+            self._blob = blob
+            self.keys = []
+
+        def blob(self, key):
+            self.keys.append(key)
+            return self._blob
+
+    class _FakeClient:
+        def __init__(self, bucket):
+            self._bucket = bucket
+            self.bucket_names = []
+
+        def bucket(self, name):
+            self.bucket_names.append(name)
+            return self._bucket
+
+    def test_uploads_with_explicit_key(self):
+        blob = self._FakeBlob()
+        bucket = self._FakeBucket(blob)
+        client = self._FakeClient(bucket)
+        pp = GCSUploadPP(
+            YoutubeDL(),
+            bucket='bucket-a',
+            key='%(uploader)s/%(title)s.%(ext)s',
+            predefined_acl='publicRead',
+        )
+        info = {
+            'filepath': '/tmp/test-video.mp4',
+            'uploader': 'creator',
+            'title': 'clip',
+            'ext': 'mp4',
+        }
+
+        with patch('yt_dlp.postprocessor.gcsupload.google_cloud_storage') as gcs_mock:
+            gcs_mock.Client.return_value = client
+            _, out_info = pp.run(info)
+
+        self.assertEqual(bucket.keys, ['creator/clip.mp4'])
+        self.assertEqual(blob.calls[0], ('/tmp/test-video.mp4', 'video/mp4', 'publicRead'))
+        self.assertEqual(out_info['gcs_url'], 'gs://bucket-a/creator/clip.mp4')
+
+
+class TestOSSUpload(unittest.TestCase):
+    class _FakeClient:
+        def __init__(self):
+            self.requests = []
+
+        def put_object(self, request):
+            self.requests.append(request)
+
+    def test_uploads_with_static_credentials(self):
+        fake_client = self._FakeClient()
+        pp = OSSUploadPP(
+            YoutubeDL(),
+            bucket='bucket-a',
+            key='%(uploader)s/%(title)s.%(ext)s',
+            region='cn-hangzhou',
+            endpoint='https://oss-cn-hangzhou.aliyuncs.com',
+            access_key_id='ak',
+            access_key_secret='sk',
+        )
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            filepath = tmp.name
+
+        info = {
+            'filepath': filepath,
+            'uploader': 'creator',
+            'title': 'clip',
+            'ext': 'mp4',
+        }
+
+        try:
+            with patch('yt_dlp.postprocessor.ossupload.alibabacloud_oss_v2') as oss_mock:
+                config = SimpleNamespace()
+                put_request = object()
+                oss_mock.config.load_default.return_value = config
+                oss_mock.Client.return_value = fake_client
+                oss_mock.PutObjectRequest.return_value = put_request
+                _, out_info = pp.run(info)
+
+            oss_mock.credentials.StaticCredentialsProvider.assert_called_once()
+            oss_mock.PutObjectRequest.assert_called_once()
+            self.assertEqual(fake_client.requests, [put_request])
+            self.assertEqual(out_info['oss_url'], 'oss://bucket-a/creator/clip.mp4')
+        finally:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+
+
+class TestUpYunUpload(unittest.TestCase):
+    class _FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def put(self, key, file_obj, checksum=True, headers=None):
+            self.calls.append((key, file_obj.read(), checksum, headers))
+
+    def test_uploads_with_explicit_key(self):
+        fake_client = self._FakeClient()
+        pp = UpYunUploadPP(
+            YoutubeDL(),
+            service='media',
+            key='%(uploader)s/%(title)s.%(ext)s',
+            operator='operator-a',
+            password='secret-a',
+            endpoint='v0.api.upyun.com',
+        )
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            filepath = tmp.name
+            tmp.write(b'video-bytes')
+
+        info = {
+            'filepath': filepath,
+            'uploader': 'creator',
+            'title': 'clip',
+            'ext': 'mp4',
+        }
+
+        try:
+            with patch('yt_dlp.postprocessor.upyunupload.upyun') as upyun_mock:
+                upyun_mock.UpYun.return_value = fake_client
+                _, out_info = pp.run(info)
+
+            upyun_mock.UpYun.assert_called_once_with(
+                'media', 'operator-a', 'secret-a', endpoint='v0.api.upyun.com')
+            self.assertEqual(fake_client.calls[0][0], 'creator/clip.mp4')
+            self.assertEqual(fake_client.calls[0][1], b'video-bytes')
+            self.assertTrue(fake_client.calls[0][2])
+            self.assertEqual(fake_client.calls[0][3], {'Content-Type': 'video/mp4'})
+            self.assertEqual(out_info['upyun_url'], 'upyun://media/creator/clip.mp4')
+        finally:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+
+    def test_delete_local_after_successful_upload(self):
+        fake_client = self._FakeClient()
+        pp = UpYunUploadPP(
+            YoutubeDL(),
+            service='media',
+            operator='operator-a',
+            password='secret-a',
+            delete_local=True,
+        )
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+            filepath = tmp.name
+            tmp.write(b'video-bytes')
+
+        try:
+            with patch('yt_dlp.postprocessor.upyunupload.upyun') as upyun_mock:
+                upyun_mock.UpYun.return_value = fake_client
+                _, out_info = pp.run({'filepath': filepath})
+
+            self.assertFalse(os.path.exists(filepath))
+            self.assertEqual(out_info['upyun_url'], f'upyun://media/{os.path.basename(filepath)}')
+        finally:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
 
 class TestModifyChaptersPP(unittest.TestCase):
     def setUp(self):
