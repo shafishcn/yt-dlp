@@ -47,7 +47,9 @@ jobs:
           sudo apt-get install -y pandoc zip
 
       - name: Install build dependencies
-        run: python -m pip install --upgrade build hatchling wheel setuptools
+        run: |
+          python -m pip install --upgrade pip build hatchling wheel setuptools
+          python devscripts/install_deps.py --include-extra pyinstaller --include-extra s3
 
       - name: Build release artifacts
         run: |
@@ -55,6 +57,8 @@ jobs:
           make yt-dlp
           make yt-dlp.tar.gz
           python -m build --no-isolation .
+          python -m bundle.pyinstaller
+          mv dist/yt-dlp_linux dist/yt-dlp_linux_s3
 
       - name: Generate checksums
         working-directory: dist

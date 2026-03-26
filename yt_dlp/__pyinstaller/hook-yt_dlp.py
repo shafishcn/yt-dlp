@@ -17,13 +17,27 @@ def pycryptodome_module():
     return 'Cryptodome'
 
 
+def safe_collect_submodules(module):
+    return collect_submodules(module, on_error='ignore')
+
+
+def safe_collect_data_files(module, **kwargs):
+    try:
+        return collect_data_files(module, **kwargs)
+    except Exception:
+        return []
+
+
 def get_hidden_imports():
     yield from ('yt_dlp.compat._legacy', 'yt_dlp.compat._deprecated')
     yield from ('yt_dlp.utils._legacy', 'yt_dlp.utils._deprecated')
     yield pycryptodome_module()
     # Only `websockets` is required, others are collected just in case
     for module in ('websockets', 'requests', 'urllib3'):
-        yield from collect_submodules(module)
+        yield from safe_collect_submodules(module)
+    # Bundle optional object-storage support when those extras are installed
+    for module in ('boto3', 'botocore', 's3transfer', 'jmespath', 'dateutil'):
+        yield from safe_collect_submodules(module)
     # These are auto-detected, but explicitly add them just in case
     yield from ('mutagen', 'brotli', 'certifi', 'secretstorage', 'curl_cffi')
 
@@ -33,5 +47,6 @@ print(f'Adding imports: {hiddenimports}')
 
 excludedimports = ['youtube_dl', 'youtube_dlc', 'test', 'ytdlp_plugins', 'devscripts', 'bundle']
 
-datas = collect_data_files('curl_cffi', includes=['cacert.pem'])
-datas += collect_data_files('yt_dlp_ejs', includes=['**/*.js'])
+datas = safe_collect_data_files('curl_cffi', includes=['cacert.pem'])
+datas += safe_collect_data_files('yt_dlp_ejs', includes=['**/*.js'])
+datas += safe_collect_data_files('botocore', includes=['data/**/*.json', 'data/**/*.gz'])
